@@ -1,0 +1,7 @@
+## Interface: 90205
+## Title: DangerAlert
+## Notes: Alerts for crowd control, AOE damage, and targeting events.
+## Version: 1.0
+## Author: YourName
+
+DangerAlert.lua

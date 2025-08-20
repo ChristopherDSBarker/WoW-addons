@@ -1,0 +1,9 @@
+##note: interface needs to be changed every patch for code to work
+## Interface: ## Interface: 120007 
+## Title: Wow Code
+## Notes: Custom tweaks (movable frames, bags, auction house, zoom).
+## Author: Barker.Christopher
+## Version: 1.0
+## DefaultState: enabled
+
+WoWCode.lua
