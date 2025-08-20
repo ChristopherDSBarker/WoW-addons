@@ -1,0 +1,6 @@
+## Interface: 120007
+## Title: Threat Meter
+## Notes: Simple threat meter
+## Author: Christopher Barker
+## Version: 1.9
+ThreatMeter.lua
