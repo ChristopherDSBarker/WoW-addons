@@ -28,7 +28,8 @@ end
 
 local function AddOrUpdateMob(sourceGUID,destGUID,sourceName,destName)
     if not sourceGUID or not destGUID then return end
-    if sourceGUID==playerGUID or destGUID==playerGUID then return end -- ignore player entirely
+    local playerName = UnitName("player")
+    if destGUID==playerGUID or destName==playerName then return end
 
     local mobName = destName or "Unknown"
     if not mobs[destGUID] then
@@ -48,9 +49,6 @@ eventFrame:SetScript("OnEvent", function(_,_,...)
           sourceGUID, sourceName, sourceFlags, sourceRaidFlags,
           destGUID, destName, destFlags, destRaidFlags,
           spellID, spellName, spellSchool, amount = CombatLogGetCurrentEventInfo()
-
-    local isEnemy = bit.band(destFlags or 0, COMBATLOG_OBJECT_REACTION_HOSTILE) > 0
-    if not isEnemy then return end
 
     if subevent=="UNIT_DIED" and mobs[destGUID] then
         if mobs[destGUID].frame then mobs[destGUID].frame:Hide() end
@@ -72,22 +70,44 @@ mainFrame:SetScript("OnUpdate",function(_,elapsed)
 
     local yOffset,maxTextWidth,currentTime=10,0,GetTime()
 
+    local playerName = UnitName("player")
     for guid,mob in pairs(mobs) do
-        if currentTime - mob.lastUpdate > idleTimeout then
+        if guid == playerGUID or mob.name == playerName or mob.name == "Unknown" then
+            if mob.frame then mob.frame:Hide() end
+            mobs[guid]=nil
+        elseif currentTime - mob.lastUpdate > idleTimeout then
             if mob.frame then mob.frame:Hide() end
             mobs[guid]=nil
         else
-            local targeting=false
+            local threatColorR,threatColorG,threatColorB=0,1,0
+            local topThreat,maxThreat=nil,0
+
+            for guidKey,threat in pairs(mob.players) do
+                if threat>maxThreat then
+                    maxThreat=threat
+                    topThreat=guidKey
+                end
+            end
+
+            local targetingPlayer=false
             for i=1,40 do
                 local unit="nameplate"..i
                 if UnitExists(unit) and UnitGUID(unit)==guid then
-                    if UnitGUID(unit.."target")==playerGUID then
-                        targeting=true
+                    local threat=UnitThreatSituation("player", unit)
+                    if threat==3 then
+                        targetingPlayer=true
                         break
+                    elseif threat==2 then
+                        topThreat=playerGUID
                     end
                 end
             end
-            mob.targetingPlayer=targeting
+
+            if targetingPlayer then
+                threatColorR,threatColorG,threatColorB=1,0,0
+            elseif topThreat==playerGUID then
+                threatColorR,threatColorG,threatColorB=1,1,0
+            end
 
             if not mob.frame then
                 mob.frame=CreateFrame("Frame",nil,mainFrame)
@@ -103,22 +123,7 @@ mainFrame:SetScript("OnUpdate",function(_,elapsed)
                 mob.text:Show()
             end
 
-            local colorR,colorG,colorB=0,1,0
-            local topThreat,maxThreat=nil,0
-            for guidKey,threat in pairs(mob.players) do
-                if threat>maxThreat then
-                    maxThreat=threat
-                    topThreat=guidKey
-                end
-            end
-
-            if mob.targetingPlayer then
-                colorR,colorG,colorB=1,0,0
-            elseif topThreat==playerGUID then
-                colorR,colorG,colorB=1,1,0
-            end
-
-            mob.circle:SetVertexColor(colorR,colorG,colorB)
+            mob.circle:SetVertexColor(threatColorR,threatColorG,threatColorB)
             mob.text:SetText(mob.name)
             mob.frame:ClearAllPoints()
             mob.frame:SetPoint("TOPLEFT",mainFrame,"TOPLEFT",10,-yOffset)
@@ -137,4 +142,4 @@ mainFrame:SetScript("OnUpdate",function(_,elapsed)
     mainFrame:SetHeight(yOffset+10)
 end)
 
-print("|cff00ff00[RealTimeThreatMeter]|r Loaded! Colors: Red/Yellow/Green accurate to player; only mobs shown, player no longer appears as Unknown.")
+print("|cff00ff00[RealTimeThreatMeter]|r Loaded! Red/Yellow/Green reflects accurate threat for player; only mobs interacting with group are shown.")
