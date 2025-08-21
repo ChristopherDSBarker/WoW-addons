@@ -1,4 +1,4 @@
--- Multi-Mob Threat Meter (Accurate Threat, Red/Yellow/Green)
+-- Multi-Mob Threat Frame (Real-Time Target-Based, Fixed UNIT_DIED)
 local frameHeight = 20
 local mobSpacing = 5
 local circleSize = 16
@@ -21,80 +21,54 @@ mainFrame:SetBackdrop({
 })
 mainFrame:SetBackdropColor(0,0,0,0.6)
 
--- Threat table
+-- Mob tracking table
 local mobs = {}
-
--- Threat multiplier helper
-local function GetThreatMultiplier(subevent)
-    if subevent:match("SWING") then return 1
-    elseif subevent:match("SPELL") then return 1.5
-    elseif subevent:match("RANGE") then return 1.0
-    else return 1 end
-end
-
--- Validate source (player or group)
-local function IsValidSource(guid)
-    if guid == UnitGUID("player") then return true end
-    for i=1, GetNumGroupMembers() do
-        local unit = IsInRaid() and "raid"..i or "party"..i
-        if UnitExists(unit) and UnitGUID(unit) == guid then return true end
-    end
-    return false
-end
-
--- Update threat from combat log
-local function UpdateThreatFromCombat(timestamp, subevent, sourceGUID, destGUID, destName, amount, destFlags)
-    if not destGUID or not destName then return end
-    if subevent == "UNIT_DIED" then
-        if mobs[destGUID] and mobs[destGUID].frame then mobs[destGUID].frame:Hide() end
-        mobs[destGUID] = nil
-        return
-    end
-
-    if not IsValidSource(sourceGUID) then return end
-
-    local isEnemy = destFlags and bit.band(destFlags, COMBATLOG_OBJECT_REACTION_HOSTILE) > 0
-    if isEnemy then
-        if not mobs[destGUID] then
-            mobs[destGUID] = {name=destName, players={}, frame=nil, circle=nil, text=nil, lastUpdate=GetTime(), unit=nil}
-        end
-        local mob = mobs[destGUID]
-        local mult = GetThreatMultiplier(subevent)
-        local numericAmount = tonumber(amount) or 0
-        mob.players[sourceGUID] = (mob.players[sourceGUID] or 0) + numericAmount * mult
-        mob.lastUpdate = GetTime()
-    end
-end
 
 -- Event frame
 local eventFrame = CreateFrame("Frame")
 eventFrame:RegisterEvent("COMBAT_LOG_EVENT_UNFILTERED")
-eventFrame:RegisterEvent("UNIT_TARGET")
-eventFrame:RegisterEvent("PLAYER_TARGET_CHANGED")
 eventFrame:RegisterEvent("PLAYER_ENTERING_WORLD")
 eventFrame:SetScript("OnEvent", function(self, event, ...)
-    if event == "COMBAT_LOG_EVENT_UNFILTERED" then
-        local timestamp, subevent, hideCaster,
-              sourceGUID, sourceName, sourceFlags, sourceRaidFlags,
-              destGUID, destName, destFlags, destRaidFlags,
-              amount = CombatLogGetCurrentEventInfo()
-        UpdateThreatFromCombat(timestamp, subevent, sourceGUID, destGUID, destName, amount, destFlags)
-    else
-        -- On target/mouseover changes, assign unit to mobs
-        for guid, mob in pairs(mobs) do
-            for _, u in pairs({"target","mouseover"}) do
-                if UnitExists(u) and UnitGUID(u) == guid then mob.unit = u end
-            end
+    local timestamp, subevent, hideCaster,
+          sourceGUID, sourceName, sourceFlags, sourceRaidFlags,
+          destGUID, destName, destFlags, destRaidFlags,
+          amount = CombatLogGetCurrentEventInfo()
+
+    if not destGUID then return end
+
+    -- Remove mob if it dies
+    if subevent == "UNIT_DIED" then
+        if mobs[destGUID] and mobs[destGUID].frame then
+            mobs[destGUID].frame:Hide()
         end
+        mobs[destGUID] = nil
+        return
     end
+
+    -- Only track hostile mobs
+    local isEnemy = bit.band(destFlags or 0, COMBATLOG_OBJECT_REACTION_HOSTILE) > 0
+    if not isEnemy then return end
+
+    if not mobs[destGUID] then
+        mobs[destGUID] = {
+            name = destName or "Unknown",
+            unit = nil,
+            frame = nil,
+            circle = nil,
+            text = nil,
+            lastUpdate = GetTime(),
+        }
+    else
+        mobs[destGUID].name = mobs[destGUID].name ~= "" and mobs[destGUID].name or (destName or "Unknown")
+    end
+    mobs[destGUID].lastUpdate = GetTime()
 end)
 
--- OnUpdate
+-- Update loop
 local elapsedSinceUpdate = 0
 mainFrame:SetScript("OnUpdate", function(self, elapsed)
     elapsedSinceUpdate = elapsedSinceUpdate + elapsed
     if elapsedSinceUpdate < updateInterval then return end
-    local deltaTime = elapsedSinceUpdate
     elapsedSinceUpdate = 0
 
     local yOffset = 10
@@ -103,10 +77,21 @@ mainFrame:SetScript("OnUpdate", function(self, elapsed)
     local playerGUID = UnitGUID("player")
 
     for guid, mob in pairs(mobs) do
-        if currentTime - mob.lastUpdate > idleTimeout or (mob.unit and (not UnitExists(mob.unit) or UnitIsDead(mob.unit))) then
+        -- Remove idle mobs
+        if currentTime - mob.lastUpdate > idleTimeout then
             if mob.frame then mob.frame:Hide() end
             mobs[guid] = nil
         else
+            -- Assign unit if unknown
+            if not mob.unit then
+                for _, u in pairs({"target", "mouseover"}) do
+                    if UnitExists(u) and UnitGUID(u) == guid then
+                        mob.unit = u
+                        break
+                    end
+                end
+            end
+
             if not mob.frame then
                 mob.frame = CreateFrame("Frame", nil, mainFrame)
                 mob.frame:SetHeight(frameHeight)
@@ -118,29 +103,22 @@ mainFrame:SetScript("OnUpdate", function(self, elapsed)
 
                 mob.text = mob.frame:CreateFontString(nil, "OVERLAY", "GameFontNormalLarge")
                 mob.text:SetPoint("LEFT", mob.circle, "RIGHT", 5, 0)
+                mob.text:Show()
             end
 
-            -- Threat % calculation
-            local maxThreat = 0
-            local playerThreat = mob.players[playerGUID] or 0
-            for guidKey, t in pairs(mob.players) do
-                if IsValidSource(guidKey) and t > maxThreat then maxThreat = t end
+            -- Determine color based on target
+            local colorR, colorG, colorB = 0,1,0 -- default green
+            if mob.unit and UnitExists(mob.unit.."target") then
+                local targetGUID = UnitGUID(mob.unit.."target")
+                if targetGUID == playerGUID then
+                    colorR, colorG, colorB = 1,0,0 -- red if attacking me
+                end
             end
-            local pct = maxThreat > 0 and (playerThreat / maxThreat) * 100 or 0
+            mob.circle:SetVertexColor(colorR, colorG, colorB)
 
-            -- Color logic
-            local r,g,b
-            if mob.unit and UnitExists(mob.unit.."target") and UnitGUID(mob.unit.."target") == playerGUID then
-                r,g,b = 1,0,0 -- Red: mob attacking me
-            elseif pct >= 80 then
-                r,g,b = 1,1,0 -- Yellow: close to switching
-            else
-                r,g,b = 0,1,0 -- Green: safe
-            end
-            mob.circle:SetVertexColor(r,g,b)
-
-            mob.frame:SetPoint("TOPLEFT", mainFrame, "TOPLEFT", 10, -yOffset)
+            -- Update text and frame position
             mob.text:SetText(mob.name)
+            mob.frame:SetPoint("TOPLEFT", mainFrame, "TOPLEFT", 10, -yOffset)
             mob.frame:Show()
 
             local textWidth = mob.text:GetStringWidth() + circleSize + 5
@@ -150,7 +128,7 @@ mainFrame:SetScript("OnUpdate", function(self, elapsed)
     end
 
     -- Resize frames
-    for _, mob in pairs(mobs) do
+    for guid, mob in pairs(mobs) do
         if mob.frame then mob.frame:SetWidth(maxTextWidth + 10) end
     end
 
@@ -158,4 +136,4 @@ mainFrame:SetScript("OnUpdate", function(self, elapsed)
     mainFrame:SetHeight(yOffset + 10)
 end)
 
-print("|cff00ff00[MultiThreatMeter]|r Loaded! Accurate threat meter active.")
+print("|cff00ff00[MultiThreatMeter]|r Loaded! Real-time target-based threat active.")
