@@ -1,9 +1,10 @@
--- Multi-Mob Threat Meter (Dynamic Resizing, Combat Log)
+-- Multi-Mob Threat Meter (Using UNIT_DIED)
 local frameHeight = 20
 local mobSpacing = 5
 local circleSize = 16
-local updateInterval = 0.2
-local idleTimeout = 10
+local updateInterval = 0.05
+local idleTimeout = 30
+local threatDecayPerSecond = 50
 
 -- Main frame
 local mainFrame = CreateFrame("Frame", "CombatThreatFrame", UIParent, "BackdropTemplate")
@@ -21,8 +22,8 @@ mainFrame:SetBackdrop({
 })
 mainFrame:SetBackdropColor(0,0,0,0.6)
 
--- Threat tables
-local mobs = {} -- mobs[GUID] = {name, totalThreat, players={}, frame, circle, text, lastUpdate}
+-- Threat table
+local mobs = {}
 
 -- Threat multiplier helper
 local function GetThreatMultiplier(subevent)
@@ -40,9 +41,19 @@ eventFrame:SetScript("OnEvent", function(self, event, ...)
           sourceGUID, sourceName, sourceFlags, sourceRaidFlags,
           destGUID, destName, destFlags, destRaidFlags,
           amount = CombatLogGetCurrentEventInfo()
+
     if not destGUID or not destName then return end
 
-    -- Only track player or group members
+    -- Remove mob if it died
+    if subevent == "UNIT_DIED" then
+        if mobs[destGUID] and mobs[destGUID].frame then
+            mobs[destGUID].frame:Hide()
+        end
+        mobs[destGUID] = nil
+        return
+    end
+
+    -- Only track player/group members
     local validSource = sourceGUID == UnitGUID("player")
     if not validSource then
         for i=1, GetNumGroupMembers() do
@@ -51,20 +62,16 @@ eventFrame:SetScript("OnEvent", function(self, event, ...)
         end
     end
 
-    if validSource and destGUID ~= UnitGUID("player") then
+    local isEnemy = bit.band(destFlags, COMBATLOG_OBJECT_REACTION_HOSTILE) > 0
+    if validSource and isEnemy then
         if not mobs[destGUID] then
-            mobs[destGUID] = {name=destName, totalThreat=0, players={}, frame=nil, circle=nil, text=nil, lastUpdate=GetTime()}
+            mobs[destGUID] = {name=destName, players={}, frame=nil, circle=nil, text=nil, lastUpdate=GetTime()}
         end
         local mob = mobs[destGUID]
         local mult = GetThreatMultiplier(subevent)
         local numericAmount = tonumber(amount) or 0
         local threatAmount = numericAmount * mult
         mob.players[sourceGUID] = (mob.players[sourceGUID] or 0) + threatAmount
-
-        mob.totalThreat = 0
-        for _, t in pairs(mob.players) do
-            mob.totalThreat = mob.totalThreat + t
-        end
         mob.lastUpdate = GetTime()
     end
 end)
@@ -74,18 +81,38 @@ local elapsedSinceUpdate = 0
 mainFrame:SetScript("OnUpdate", function(self, elapsed)
     elapsedSinceUpdate = elapsedSinceUpdate + elapsed
     if elapsedSinceUpdate < updateInterval then return end
+    local deltaTime = elapsedSinceUpdate
     elapsedSinceUpdate = 0
 
-    local yOffset = 10 -- top padding
+    local yOffset = 10
     local maxTextWidth = 0
     local currentTime = GetTime()
+    local sortedMobs = {}
+    local playerGUID = UnitGUID("player")
+    local playerAlive = not UnitIsDeadOrGhost("player")
+    local playerVisible = UnitIsVisible("player") and not UnitIsFeignDeath("player")
+    local inCombat = UnitAffectingCombat("player")
+
+    -- Reset player threat immediately if dead/invisible/out of combat
+    if not playerAlive or not playerVisible or not inCombat then
+        for _, mob in pairs(mobs) do
+            mob.players[playerGUID] = 0
+        end
+    end
 
     for guid, mob in pairs(mobs) do
-        -- Remove idle mobs
         if currentTime - mob.lastUpdate > idleTimeout then
             if mob.frame then mob.frame:Hide() end
             mobs[guid] = nil
         else
+            -- Max threat calculation
+            local maxThreat = 0
+            for _, t in pairs(mob.players) do
+                if t > maxThreat then maxThreat = t end
+            end
+            local playerThreat = mob.players[playerGUID] or 0
+            local pct = maxThreat > 0 and (playerThreat / maxThreat) * 100 or 0
+
             -- Create frame if missing
             if not mob.frame then
                 mob.frame = CreateFrame("Frame", nil, mainFrame)
@@ -101,17 +128,7 @@ mainFrame:SetScript("OnUpdate", function(self, elapsed)
                 mob.text:SetPoint("LEFT", mob.circle, "RIGHT", 5, 0)
             end
 
-            mob.frame:SetPoint("TOPLEFT", mainFrame, "TOPLEFT", 10, -yOffset)
-            mob.text:SetText(mob.name)
-            mob.frame:Show()
-
-            -- Compute threat %
-            local playerThreat = mob.players[UnitGUID("player")] or 0
-            local maxThreat = 0
-            for _, t in pairs(mob.players) do if t > maxThreat then maxThreat = t end end
-            local pct = maxThreat > 0 and (playerThreat / maxThreat) * 100 or 0
-
-            -- Color circle
+            -- Update color
             if pct >= 100 then
                 mob.circle:SetVertexColor(1,0,0)
             elseif pct >= 80 then
@@ -120,21 +137,44 @@ mainFrame:SetScript("OnUpdate", function(self, elapsed)
                 mob.circle:SetVertexColor(0,1,0)
             end
 
+            mob.frame:SetPoint("TOPLEFT", mainFrame, "TOPLEFT", 10, -yOffset)
+            mob.text:SetText(mob.name)
+            mob.frame:Show()
+
+            -- Decay for other players
+            for guid2, threat in pairs(mob.players) do
+                if guid2 ~= playerGUID then
+                    mob.players[guid2] = math.max(threat - threatDecayPerSecond * deltaTime, 0)
+                end
+            end
+
+            -- Total threat
+            mob.totalThreat = 0
+            for _, t in pairs(mob.players) do
+                mob.totalThreat = mob.totalThreat + t
+            end
+
+            table.insert(sortedMobs, mob)
             local textWidth = mob.text:GetStringWidth() + circleSize + 5
             if textWidth > maxTextWidth then maxTextWidth = textWidth end
-
             yOffset = yOffset + frameHeight + mobSpacing
         end
     end
 
-    -- Resize all mob frames
-    for guid, mob in pairs(mobs) do
+    -- Sort by player threat
+    table.sort(sortedMobs, function(a,b)
+        local aThreat = a.players[playerGUID] or 0
+        local bThreat = b.players[playerGUID] or 0
+        return aThreat > bThreat
+    end)
+
+    -- Resize frames
+    for _, mob in ipairs(sortedMobs) do
         if mob.frame then mob.frame:SetWidth(maxTextWidth + 10) end
     end
 
-    -- Resize main frame to fit all mob frames
     mainFrame:SetWidth(maxTextWidth + 20)
     mainFrame:SetHeight(yOffset + 10)
 end)
 
-print("|cff00ff00[MultiThreatMeter]|r Loaded! Dynamic multi-mob threat meter active.")
+print("|cff00ff00[MultiThreatMeter]|r Loaded! UNIT_DIED handling active.")
