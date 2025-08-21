@@ -28,11 +28,11 @@ end
 
 local function AddOrUpdateMob(sourceGUID,destGUID,sourceName,destName)
     if not sourceGUID or not destGUID then return end
-    if destGUID==playerGUID then return end -- never show player
+    if sourceGUID==playerGUID or destGUID==playerGUID then return end -- ignore player entirely
 
     local mobName = destName or "Unknown"
     if not mobs[destGUID] then
-        mobs[destGUID] = {name=mobName, players={}, lastUpdate=GetTime(), targetingPlayer=false, frame=nil, circle=nil, text=nil}
+        mobs[destGUID] = {name=mobName, players={}, lastUpdate=GetTime(), frame=nil, circle=nil, text=nil}
     else
         mobs[destGUID].lastUpdate = GetTime()
         if destName then mobs[destGUID].name = destName end
@@ -137,4 +137,4 @@ mainFrame:SetScript("OnUpdate",function(_,elapsed)
     mainFrame:SetHeight(yOffset+10)
 end)
 
-print("|cff00ff00[RealTimeThreatMeter]|r Loaded! Colors: Red/Yellow/Green accurate to player; only mobs shown.")
+print("|cff00ff00[RealTimeThreatMeter]|r Loaded! Colors: Red/Yellow/Green accurate to player; only mobs shown, player no longer appears as Unknown.")
