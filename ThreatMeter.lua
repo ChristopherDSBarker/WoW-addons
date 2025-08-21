@@ -1,10 +1,11 @@
--- Multi-Mob Threat Meter (Real-Time, Red/Yellow/Green, Party/Raid)
+-- Multi-Mob Threat Meter (Red/Yellow/Green, Real-Time, Player + Group Interactions)
 local frameHeight = 20
 local mobSpacing = 5
 local circleSize = 16
 local updateInterval = 0.05
 local idleTimeout = 30
 
+-- Main frame
 local mainFrame = CreateFrame("Frame", "RealTimeThreatFrame", UIParent, "BackdropTemplate")
 mainFrame:SetPoint("CENTER")
 mainFrame:SetMovable(true)
@@ -20,32 +21,44 @@ mainFrame:SetBackdrop({
 })
 mainFrame:SetBackdropColor(0,0,0,0.6)
 
+-- Mob tracking
 local mobs = {}
 local playerGUID = UnitGUID("player")
 
--- Track pseudo-threat
-local function UpdateTopThreat(sourceGUID, destGUID, isHitPlayer)
+-- Track pseudo-threat per mob
+local function UpdateTopThreat(sourceGUID, destGUID)
     if not destGUID then return end
     if not mobs[destGUID] then return end
     mobs[destGUID].players = mobs[destGUID].players or {}
     mobs[destGUID].players[sourceGUID] = (mobs[destGUID].players[sourceGUID] or 0) + 1
     mobs[destGUID].lastUpdate = GetTime()
+end
 
-    -- Track if mob recently hit the player
-    if isHitPlayer then
-        mobs[destGUID].hitPlayerTime = GetTime()
+-- Check if GUID is a player in your group
+local function IsGroupPlayer(guid)
+    if guid == playerGUID then return true end
+    for i = 1, GetNumGroupMembers() do
+        if UnitExists("party"..i) and UnitGUID("party"..i) == guid then return true end
+        if UnitExists("raid"..i) and UnitGUID("raid"..i) == guid then return true end
     end
+    return false
 end
 
 -- Combat log tracking
 local eventFrame = CreateFrame("Frame")
 eventFrame:RegisterEvent("COMBAT_LOG_EVENT_UNFILTERED")
 eventFrame:RegisterEvent("PLAYER_ENTERING_WORLD")
-eventFrame:SetScript("OnEvent", function(_, event, ...)
+eventFrame:SetScript("OnEvent", function(_, _, ...)
     local timestamp, subevent, hideCaster,
           sourceGUID, sourceName, sourceFlags, sourceRaidFlags,
           destGUID, destName, destFlags, destRaidFlags,
           spellID, spellName, spellSchool, amount = CombatLogGetCurrentEventInfo()
+
+    if not destGUID then return end
+
+    -- Only track hostile mobs
+    local isEnemy = bit.band(destFlags or 0, COMBATLOG_OBJECT_REACTION_HOSTILE) > 0
+    if not isEnemy then return end
 
     -- Remove dead mobs
     if subevent == "UNIT_DIED" and mobs[destGUID] then
@@ -54,39 +67,35 @@ eventFrame:SetScript("OnEvent", function(_, event, ...)
         return
     end
 
-    -- Only track hostile mobs
-    local isEnemy = bit.band(destFlags or 0, COMBATLOG_OBJECT_REACTION_HOSTILE) > 0
-    if not isEnemy or not destGUID then return end
+    -- Only add mobs interacting with player/party/raid
+    if IsGroupPlayer(destGUID) or IsGroupPlayer(sourceGUID) then
+        if not mobs[destGUID] then
+            mobs[destGUID] = {
+                name = destName or "Unknown",
+                frame = nil,
+                circle = nil,
+                text = nil,
+                lastUpdate = GetTime(),
+                players = {},
+                hitPlayerTime = (destGUID == playerGUID) and GetTime() or nil,
+            }
+        else
+            mobs[destGUID].lastUpdate = GetTime()
+            if destGUID == playerGUID then
+                mobs[destGUID].hitPlayerTime = GetTime() -- Red only for player
+            end
+        end
 
-    -- Initialize mob
-    if not mobs[destGUID] then
-        mobs[destGUID] = {
-            name = destName or "Unknown",
-            frame = nil,
-            circle = nil,
-            text = nil,
-            lastUpdate = GetTime(),
-            players = {},
-            hitPlayerTime = 0,
-        }
-    else
-        mobs[destGUID].name = mobs[destGUID].name ~= "" and mobs[destGUID].name or (destName or "Unknown")
-        mobs[destGUID].lastUpdate = GetTime()
+        -- Track pseudo-threat
+        if sourceGUID and sourceGUID ~= destGUID then
+            UpdateTopThreat(sourceGUID, destGUID)
+        end
     end
-
-    -- Determine if this event hit the player
-    local hitPlayer = false
-    if destGUID == playerGUID and (subevent:find("DAMAGE") or subevent:find("SPELL") or subevent:find("ENVIRONMENTAL")) then
-        hitPlayer = true
-    end
-
-    -- Update pseudo-threat
-    if sourceGUID then UpdateTopThreat(sourceGUID, destGUID, hitPlayer) end
 end)
 
 -- Update loop
 local elapsedSinceUpdate = 0
-mainFrame:SetScript("OnUpdate", function(self, elapsed)
+mainFrame:SetScript("OnUpdate", function(_, elapsed)
     elapsedSinceUpdate = elapsedSinceUpdate + elapsed
     if elapsedSinceUpdate < updateInterval then return end
     elapsedSinceUpdate = 0
@@ -106,10 +115,12 @@ mainFrame:SetScript("OnUpdate", function(self, elapsed)
             if not mob.frame then
                 mob.frame = CreateFrame("Frame", nil, mainFrame)
                 mob.frame:SetHeight(frameHeight)
+                
                 mob.circle = mob.frame:CreateTexture(nil, "ARTWORK")
                 mob.circle:SetSize(circleSize, circleSize)
                 mob.circle:SetPoint("LEFT", mob.frame, "LEFT", 0, 0)
                 mob.circle:SetTexture("Interface\\BUTTONS\\UI-Panel-Button-Up")
+
                 mob.text = mob.frame:CreateFontString(nil, "OVERLAY", "GameFontNormalLarge")
                 mob.text:SetPoint("LEFT", mob.circle, "RIGHT", 5, 0)
                 mob.text:Show()
@@ -118,7 +129,6 @@ mainFrame:SetScript("OnUpdate", function(self, elapsed)
             -- Determine color
             local colorR, colorG, colorB = 0,1,0 -- default green
             local topThreat, maxThreat = nil, 0
-
             for guidKey, threat in pairs(mob.players) do
                 if threat > maxThreat then
                     maxThreat = threat
@@ -127,19 +137,19 @@ mainFrame:SetScript("OnUpdate", function(self, elapsed)
             end
 
             if mob.hitPlayerTime and currentTime - mob.hitPlayerTime <= 2 then
-                -- Red if mob hit player in last 2 seconds
-                colorR, colorG, colorB = 1,0,0
+                colorR, colorG, colorB = 1,0,0 -- Red for player
             elseif topThreat == playerGUID then
-                -- Yellow if top pseudo-threat but mob not attacking you
-                colorR, colorG, colorB = 1,1,0
+                colorR, colorG, colorB = 1,1,0 -- Yellow if top pseudo-threat
             end
 
             mob.circle:SetVertexColor(colorR, colorG, colorB)
 
             -- Update text & position
             mob.text:SetText(mob.name)
+            mob.frame:ClearAllPoints()
             mob.frame:SetPoint("TOPLEFT", mainFrame, "TOPLEFT", 10, -yOffset)
             mob.frame:Show()
+            mob.text:Show()
 
             maxTextWidth = math.max(maxTextWidth, mob.text:GetStringWidth() + circleSize + 5)
             yOffset = yOffset + frameHeight + mobSpacing
@@ -154,4 +164,4 @@ mainFrame:SetScript("OnUpdate", function(self, elapsed)
     mainFrame:SetHeight(yOffset + 10)
 end)
 
-print("|cff00ff00[RealTimeThreatMeter]|r Loaded! Red/Yellow/Green working for party/raid.")
+print("|cff00ff00[RealTimeThreatMeter]|r Loaded! Red/Yellow/Green for player; frame shows mobs interacting with group.")
