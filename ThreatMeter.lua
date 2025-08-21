@@ -1,10 +1,9 @@
--- Multi-Mob Threat Meter (Using UNIT_DIED)
+-- Multi-Mob Threat Meter (Accurate Threat, Red/Yellow/Green)
 local frameHeight = 20
 local mobSpacing = 5
 local circleSize = 16
 local updateInterval = 0.05
 local idleTimeout = 30
-local threatDecayPerSecond = 50
 
 -- Main frame
 local mainFrame = CreateFrame("Frame", "CombatThreatFrame", UIParent, "BackdropTemplate")
@@ -33,50 +32,64 @@ local function GetThreatMultiplier(subevent)
     else return 1 end
 end
 
--- Combat log tracking
-local eventFrame = CreateFrame("Frame")
-eventFrame:RegisterEvent("COMBAT_LOG_EVENT_UNFILTERED")
-eventFrame:SetScript("OnEvent", function(self, event, ...)
-    local timestamp, subevent, hideCaster,
-          sourceGUID, sourceName, sourceFlags, sourceRaidFlags,
-          destGUID, destName, destFlags, destRaidFlags,
-          amount = CombatLogGetCurrentEventInfo()
+-- Validate source (player or group)
+local function IsValidSource(guid)
+    if guid == UnitGUID("player") then return true end
+    for i=1, GetNumGroupMembers() do
+        local unit = IsInRaid() and "raid"..i or "party"..i
+        if UnitExists(unit) and UnitGUID(unit) == guid then return true end
+    end
+    return false
+end
 
+-- Update threat from combat log
+local function UpdateThreatFromCombat(timestamp, subevent, sourceGUID, destGUID, destName, amount, destFlags)
     if not destGUID or not destName then return end
-
-    -- Remove mob if it died
     if subevent == "UNIT_DIED" then
-        if mobs[destGUID] and mobs[destGUID].frame then
-            mobs[destGUID].frame:Hide()
-        end
+        if mobs[destGUID] and mobs[destGUID].frame then mobs[destGUID].frame:Hide() end
         mobs[destGUID] = nil
         return
     end
 
-    -- Only track player/group members
-    local validSource = sourceGUID == UnitGUID("player")
-    if not validSource then
-        for i=1, GetNumGroupMembers() do
-            local unit = IsInRaid() and "raid"..i or "party"..i
-            if UnitGUID(unit) == sourceGUID then validSource = true; break end
-        end
-    end
+    if not IsValidSource(sourceGUID) then return end
 
-    local isEnemy = bit.band(destFlags, COMBATLOG_OBJECT_REACTION_HOSTILE) > 0
-    if validSource and isEnemy then
+    local isEnemy = destFlags and bit.band(destFlags, COMBATLOG_OBJECT_REACTION_HOSTILE) > 0
+    if isEnemy then
         if not mobs[destGUID] then
-            mobs[destGUID] = {name=destName, players={}, frame=nil, circle=nil, text=nil, lastUpdate=GetTime()}
+            mobs[destGUID] = {name=destName, players={}, frame=nil, circle=nil, text=nil, lastUpdate=GetTime(), unit=nil}
         end
         local mob = mobs[destGUID]
         local mult = GetThreatMultiplier(subevent)
         local numericAmount = tonumber(amount) or 0
-        local threatAmount = numericAmount * mult
-        mob.players[sourceGUID] = (mob.players[sourceGUID] or 0) + threatAmount
+        mob.players[sourceGUID] = (mob.players[sourceGUID] or 0) + numericAmount * mult
         mob.lastUpdate = GetTime()
+    end
+end
+
+-- Event frame
+local eventFrame = CreateFrame("Frame")
+eventFrame:RegisterEvent("COMBAT_LOG_EVENT_UNFILTERED")
+eventFrame:RegisterEvent("UNIT_TARGET")
+eventFrame:RegisterEvent("PLAYER_TARGET_CHANGED")
+eventFrame:RegisterEvent("PLAYER_ENTERING_WORLD")
+eventFrame:SetScript("OnEvent", function(self, event, ...)
+    if event == "COMBAT_LOG_EVENT_UNFILTERED" then
+        local timestamp, subevent, hideCaster,
+              sourceGUID, sourceName, sourceFlags, sourceRaidFlags,
+              destGUID, destName, destFlags, destRaidFlags,
+              amount = CombatLogGetCurrentEventInfo()
+        UpdateThreatFromCombat(timestamp, subevent, sourceGUID, destGUID, destName, amount, destFlags)
+    else
+        -- On target/mouseover changes, assign unit to mobs
+        for guid, mob in pairs(mobs) do
+            for _, u in pairs({"target","mouseover"}) do
+                if UnitExists(u) and UnitGUID(u) == guid then mob.unit = u end
+            end
+        end
     end
 end)
 
--- Update frame
+-- OnUpdate
 local elapsedSinceUpdate = 0
 mainFrame:SetScript("OnUpdate", function(self, elapsed)
     elapsedSinceUpdate = elapsedSinceUpdate + elapsed
@@ -87,33 +100,13 @@ mainFrame:SetScript("OnUpdate", function(self, elapsed)
     local yOffset = 10
     local maxTextWidth = 0
     local currentTime = GetTime()
-    local sortedMobs = {}
     local playerGUID = UnitGUID("player")
-    local playerAlive = not UnitIsDeadOrGhost("player")
-    local playerVisible = UnitIsVisible("player") and not UnitIsFeignDeath("player")
-    local inCombat = UnitAffectingCombat("player")
-
-    -- Reset player threat immediately if dead/invisible/out of combat
-    if not playerAlive or not playerVisible or not inCombat then
-        for _, mob in pairs(mobs) do
-            mob.players[playerGUID] = 0
-        end
-    end
 
     for guid, mob in pairs(mobs) do
-        if currentTime - mob.lastUpdate > idleTimeout then
+        if currentTime - mob.lastUpdate > idleTimeout or (mob.unit and (not UnitExists(mob.unit) or UnitIsDead(mob.unit))) then
             if mob.frame then mob.frame:Hide() end
             mobs[guid] = nil
         else
-            -- Max threat calculation
-            local maxThreat = 0
-            for _, t in pairs(mob.players) do
-                if t > maxThreat then maxThreat = t end
-            end
-            local playerThreat = mob.players[playerGUID] or 0
-            local pct = maxThreat > 0 and (playerThreat / maxThreat) * 100 or 0
-
-            -- Create frame if missing
             if not mob.frame then
                 mob.frame = CreateFrame("Frame", nil, mainFrame)
                 mob.frame:SetHeight(frameHeight)
@@ -122,54 +115,42 @@ mainFrame:SetScript("OnUpdate", function(self, elapsed)
                 mob.circle:SetSize(circleSize, circleSize)
                 mob.circle:SetPoint("LEFT", mob.frame, "LEFT", 0, 0)
                 mob.circle:SetTexture("Interface\\BUTTONS\\UI-Panel-Button-Up")
-                mob.circle:SetVertexColor(0,1,0)
 
                 mob.text = mob.frame:CreateFontString(nil, "OVERLAY", "GameFontNormalLarge")
                 mob.text:SetPoint("LEFT", mob.circle, "RIGHT", 5, 0)
             end
 
-            -- Update color
-            if pct >= 100 then
-                mob.circle:SetVertexColor(1,0,0)
-            elseif pct >= 80 then
-                mob.circle:SetVertexColor(1,1,0)
-            else
-                mob.circle:SetVertexColor(0,1,0)
+            -- Threat % calculation
+            local maxThreat = 0
+            local playerThreat = mob.players[playerGUID] or 0
+            for guidKey, t in pairs(mob.players) do
+                if IsValidSource(guidKey) and t > maxThreat then maxThreat = t end
             end
+            local pct = maxThreat > 0 and (playerThreat / maxThreat) * 100 or 0
+
+            -- Color logic
+            local r,g,b
+            if mob.unit and UnitExists(mob.unit.."target") and UnitGUID(mob.unit.."target") == playerGUID then
+                r,g,b = 1,0,0 -- Red: mob attacking me
+            elseif pct >= 80 then
+                r,g,b = 1,1,0 -- Yellow: close to switching
+            else
+                r,g,b = 0,1,0 -- Green: safe
+            end
+            mob.circle:SetVertexColor(r,g,b)
 
             mob.frame:SetPoint("TOPLEFT", mainFrame, "TOPLEFT", 10, -yOffset)
             mob.text:SetText(mob.name)
             mob.frame:Show()
 
-            -- Decay for other players
-            for guid2, threat in pairs(mob.players) do
-                if guid2 ~= playerGUID then
-                    mob.players[guid2] = math.max(threat - threatDecayPerSecond * deltaTime, 0)
-                end
-            end
-
-            -- Total threat
-            mob.totalThreat = 0
-            for _, t in pairs(mob.players) do
-                mob.totalThreat = mob.totalThreat + t
-            end
-
-            table.insert(sortedMobs, mob)
             local textWidth = mob.text:GetStringWidth() + circleSize + 5
             if textWidth > maxTextWidth then maxTextWidth = textWidth end
             yOffset = yOffset + frameHeight + mobSpacing
         end
     end
 
-    -- Sort by player threat
-    table.sort(sortedMobs, function(a,b)
-        local aThreat = a.players[playerGUID] or 0
-        local bThreat = b.players[playerGUID] or 0
-        return aThreat > bThreat
-    end)
-
     -- Resize frames
-    for _, mob in ipairs(sortedMobs) do
+    for _, mob in pairs(mobs) do
         if mob.frame then mob.frame:SetWidth(maxTextWidth + 10) end
     end
 
@@ -177,4 +158,4 @@ mainFrame:SetScript("OnUpdate", function(self, elapsed)
     mainFrame:SetHeight(yOffset + 10)
 end)
 
-print("|cff00ff00[MultiThreatMeter]|r Loaded! UNIT_DIED handling active.")
+print("|cff00ff00[MultiThreatMeter]|r Loaded! Accurate threat meter active.")
