@@ -29,7 +29,15 @@ end
 local function AddOrUpdateMob(sourceGUID,destGUID,sourceName,destName)
     if not sourceGUID or not destGUID then return end
     local playerName = UnitName("player")
+    -- Exclude player and group members
     if destGUID==playerGUID or destName==playerName then return end
+    for i=1,GetNumGroupMembers() do
+        local partyGUID = UnitGUID("party"..i)
+        local raidGUID = UnitGUID("raid"..i)
+        local partyName = UnitName("party"..i)
+        local raidName = UnitName("raid"..i)
+        if destGUID == partyGUID or destGUID == raidGUID or destName == partyName or destName == raidName then return end
+    end
 
     local mobName = destName or "Unknown"
     if not mobs[destGUID] then
